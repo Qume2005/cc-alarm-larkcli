@@ -33,9 +33,13 @@ Flags (any order, after the two positionals):
   -h, --help   Print this help and exit 0.
 
 Config: ~/.config/cc-alarm-larkcli/config.sh (override path via CONFIG_PATH env).
-        Set exactly ONE of RECIPIENT_USER_ID / RECIPIENT_CHAT_ID.
+        The config file is OPTIONAL. With neither RECIPIENT_USER_ID nor
+        RECIPIENT_CHAT_ID set (or with no config file at all), the message is
+        sent to the currently logged-in user (you). Set exactly ONE of
+        RECIPIENT_USER_ID / RECIPIENT_CHAT_ID to override; setting BOTH is
+        ambiguous and exits 2.
 
-Exit codes: 0=ok/dry-run/throttled, 2=config missing or ambiguous,
+Exit codes: 0=ok/dry-run/throttled, 2=recipient ambiguous or not logged in,
             3=bad arguments, other=lark-cli send failure (passthrough).
 EOF
 }
@@ -135,24 +139,19 @@ fi
 # CONFIG_PATH override is for testing; default is the documented user path.
 config_path="${CONFIG_PATH:-$HOME/.config/cc-alarm-larkcli/config.sh}"
 
-if [[ ! -f "$config_path" ]]; then
-  cat >&2 <<EOF
-$PROG: recipient not configured.
-Create ~/.config/cc-alarm-larkcli/config.sh with exactly one of:
-  RECIPIENT_USER_ID="ou_xxx"   # DM a user
-  RECIPIENT_CHAT_ID="oc_xxx"   # send to a chat
-See config.example.sh for the full template.
-EOF
-  exit 2
+# Config file is OPTIONAL. If it does not exist, skip sourcing and fall through
+# with empty uid/cid and the default AS/THROTTLE values (set via :- below), so
+# execution reaches the self-resolution block and sends to the logged-in user.
+# This makes the plugin truly zero-config: `lark-cli auth login` is enough.
+if [[ -f "$config_path" ]]; then
+  # shellcheck disable=SC1090
+  source "$config_path"
 fi
-
-# shellcheck disable=SC1090
-source "$config_path"
 
 # set -u-safe reads of config (contract §10b, verbatim pattern).
 uid="${RECIPIENT_USER_ID:-}"
 cid="${RECIPIENT_CHAT_ID:-}"
-as="${AS:-user}"
+as="${AS:-bot}"
 throttle="${THROTTLE_SECONDS:-300}"
 
 # Validate throttle: must be a non-negative integer, else fall back to 300.
@@ -161,16 +160,38 @@ if ! [[ "$throttle" =~ ^[0-9]+$ ]]; then
   throttle=300
 fi
 
-# Exactly one recipient required.
+# Default recipient: when NEITHER is configured, send to the currently logged-in
+# user (self). Lazy — only runs `lark-cli auth status` when both uid and cid are
+# empty; an explicit RECIPIENT_USER_ID / RECIPIENT_CHAT_ID always wins unchanged.
+# json_get: extract a dotted-path field from a JSON document. Prefer jq; fall
+# back to python3 when jq is absent OR fails (covers broken jq / unexpected JSON).
+json_get() {
+  local doc="$1" key="$2" val
+  if command -v jq >/dev/null 2>&1; then
+    val="$(jq -r "$key // empty" 2>/dev/null <<<"$doc")" && [[ -n "$val" ]] && {
+      printf '%s' "$val"
+      return 0
+    }
+  fi
+  python3 -c 'import json,sys
+d=json.load(sys.stdin)
+for p in sys.argv[1].lstrip(".").split("."):
+    if not isinstance(d, dict) or p not in d:
+        sys.stdout.write(""); sys.exit(0)
+    d=d[p]
+sys.stdout.write("" if d is None else str(d))' "$key" <<<"$doc" 2>/dev/null
+}
+
 if [[ -z "$uid" && -z "$cid" ]]; then
-  cat >&2 <<EOF
-$PROG: recipient not configured.
-Create ~/.config/cc-alarm-larkcli/config.sh with exactly one of:
-  RECIPIENT_USER_ID="ou_xxx"   # DM a user
-  RECIPIENT_CHAT_ID="oc_xxx"   # send to a chat
-See config.example.sh for the full template.
-EOF
-  exit 2
+  auth_out="$(lark-cli auth status 2>/dev/null || true)"
+  self_uid="$(json_get "$auth_out" '.identities.user.openId')"
+  if [[ -n "$self_uid" ]]; then
+    uid="$self_uid"   # route through the existing --user-id path → sends to self.
+  else
+    # No usable identity: same non-fatal exit-2 path as missing config.
+    echo "$PROG: recipient not configured and no logged-in user; run 'lark-cli auth login' then retry." >&2
+    exit 2
+  fi
 fi
 
 # Mutually exclusive.

@@ -1,6 +1,6 @@
 # cc-alarm-larkcli
 
-给 Claude Code 子 agent 用的飞书通知小工具。一个 `notify.sh` 脚本 + 一份收件人配置，覆盖四种场景：任务完成（done）、需要确认（ask）、长任务进度（progress）、任务失败（error）。agent 在跑训练/编译/长任务时用它 ping 你，跑完汇报，卡住时找你拍板，失败时把错误推出来。
+给 Claude Code 子 agent 用的飞书通知小工具。一个 `notify.sh` 脚本（收件人默认发给你自己，无需配置），覆盖四种场景：任务完成（done）、需要确认（ask）、长任务进度（progress）、任务失败（error）。agent 在跑训练/编译/长任务时用它 ping 你，跑完汇报，卡住时找你拍板，失败时把错误推出来。
 
 通知是锦上添花，**不是关键路径**：发送失败绝不阻塞主任务，记一行日志继续干。
 
@@ -14,43 +14,61 @@ ln -s ~/projects/cc-alarm-larkcli ~/.claude/skills/cc-alarm-larkcli
 
 > 源是 `~/projects/cc-alarm-larkcli`，软链只用于技能发现。所有改动回到项目目录里改，别改软链那一侧。
 
-## 配置收件人（一次性）
+## 配置收件人（可选——默认发给你自己）
 
-`notify.sh` 会 `source ~/.config/cc-alarm-larkcli/config.sh`。没配每次都会 exit 2（非致命，但消息永远发不出）。
+**好消息：收件人配置现在是可选的。** 只要你已经 `lark-cli auth login` 过，什么都不配，`notify.sh` 会自动解析**当前登录用户**并发给你自己。想发给别人或发到群，才需要配。
 
-### 1. 拿到你的飞书 ID
+`notify.sh` 会 `source ~/.config/cc-alarm-larkcli/config.sh`（文件不存在则走「发给自己」的默认路径，见下文收件人解析顺序）。
 
-用 `lark-cli`（先 `lark-cli auth login` 完成认证，见 `lark-shared` skill）：
+### 收件人解析顺序（优先级从高到低）
+
+1. 配了 `RECIPIENT_USER_ID` → 发给这个用户（`ou_xxx`）。
+2. 否则配了 `RECIPIENT_CHAT_ID` → 发到这个群（`oc_xxx`）。
+3. 否则 → 解析**当前登录用户**（`lark-cli auth status` 读 `identities.user.openId`），发给你自己。无需手动查 ID。
+4. 如果解析失败（没登录 / 没有用户身份）→ exit 2（非致命），stderr 提示去跑 `lark-cli auth login`，什么都不发。
+5. 两个都配 = 二义 → exit 2。
+
+### 最小可用路径（发给自己）
 
 ```bash
-# 你的个人 open_id（ou_xxx）—— 给自己发 DM
-lark-cli contact +search-user --user-ids me --format json
+lark-cli auth login   # 认证一次，见 lark-shared skill
+# 不用建 config.sh，直接发：
+bash ~/projects/cc-alarm-larkcli/scripts/notify.sh done "测试：cc-alarm-larkcli 已就绪"
+```
 
+默认发送身份是 `bot`（`AS=bot`），所以 `auth login` 授予的 scope 就够用，开箱即发。
+
+### 想覆盖默认（发给别人 / 发到群）？
+
+只有这种情况才需要建 `config.sh` 并填一个收件人 ID：
+
+```bash
+mkdir -p ~/.config/cc-alarm-larkcli
+cp ~/projects/cc-alarm-larkcli/config.example.sh ~/.config/cc-alarm-larkcli/config.sh
+# 编辑 config.sh，二选一填一个 ID
+```
+
+查群 ID 用 `lark-cli`（个人 open_id 不用查——默认就发给自己）：
+
+```bash
 # 某个群的 chat_id（oc_xxx）—— 发到群里
 lark-cli im +chat-search --query "<群名>" --format json
 # 或列出你所有群
 lark-cli im +chat-list --format json
 ```
 
-从输出里抓出 `ou_xxx` 或 `oc_xxx`。
-
-### 2. 拷贝模板并填入
-
-```bash
-mkdir -p ~/.config/cc-alarm-larkcli
-cp ~/projects/cc-alarm-larkcli/config.example.sh ~/.config/cc-alarm-larkcli/config.sh
-# 编辑 config.sh
-```
-
-### 3. 配置变量说明
+### 配置变量说明
 
 ```sh
-# 二选一：DM 一个用户，或发到一个群。两个都配 = 二义 = exit 2。
-RECIPIENT_USER_ID="ou_xxx"   # 你的 open_id
-# RECIPIENT_CHAT_ID="oc_xxx" # 群 chat_id（与上面互斥）
+# 两个都是可选的。都不填 = 发给自己（默认）。
+# 想覆盖才填其中一个；两个都填 = 二义 = exit 2。
+RECIPIENT_USER_ID="ou_xxx"   # 给这个用户发 DM（不填则不覆盖）
+# RECIPIENT_CHAT_ID="oc_xxx" # 发到这个群（与上面互斥）
 
-# 可选：身份。'user'（默认）或 'bot'。绝大多数场景用 user。
-# AS="user"
+# 可选：发送身份。默认 'bot'（开箱即发）。
+# 想让消息以「你自己」名义发出才设 AS="user"——那需要额外授予
+# im:message.send_as_user scope（见 lark-shared skill）。普通用途别设。
+# AS="bot"
 
 # 可选：progress 节流秒数。默认 300（5 分钟）。
 # THROTTLE_SECONDS=300
@@ -58,14 +76,14 @@ RECIPIENT_USER_ID="ou_xxx"   # 你的 open_id
 
 | 变量 | 必填 | 默认 | 含义 |
 |------|------|------|------|
-| `RECIPIENT_USER_ID` | 二选一 | — | `ou_xxx`，给这个用户发 DM。与 `RECIPIENT_CHAT_ID` 互斥。 |
-| `RECIPIENT_CHAT_ID` | 二选一 | — | `oc_xxx`，发到这个群。与 `RECIPIENT_USER_ID` 互斥。 |
-| `AS` | 否 | `user` | 传给 `lark-cli --as`，通常 `user`。 |
+| `RECIPIENT_USER_ID` | 否 | （空，发给自己） | `ou_xxx`，给这个用户发 DM。与 `RECIPIENT_CHAT_ID` 互斥。 |
+| `RECIPIENT_CHAT_ID` | 否 | （空，发给自己） | `oc_xxx`，发到这个群。与 `RECIPIENT_USER_ID` 互斥。 |
+| `AS` | 否 | `bot` | 传给 `lark-cli --as`。默认 `bot` 开箱即发；`user` 需额外 scope。 |
 | `THROTTLE_SECONDS` | 否 | `300` | `progress` 两次发送最小间隔秒数，整数 ≥ 0。 |
 
-### 4. 验证
+### 验证
 
-真发一条，确认飞书收到：
+真发一条，确认飞书收到（默认发给你自己，不用配 config.sh）：
 
 ```bash
 bash ~/projects/cc-alarm-larkcli/scripts/notify.sh done "测试：cc-alarm-larkcli 配置完成"
@@ -96,7 +114,7 @@ bash ~/projects/cc-alarm-larkcli/scripts/notify.sh done "测试：cc-alarm-larkc
 | Code | 含义 | 调用方动作 |
 |------|------|-----------|
 | `0` | 成功发送 / `progress` 被节流 / `--dry-run` | 继续 |
-| `2` | 配置缺失或二义（收件人没配 / 两个都配了） | 记一行，继续（非致命） |
+| `2` | 收件人解析失败（没登录用户 / 两个收件人都配了） | 记一行，继续（非致命） |
 | `3` | 参数错误（未知 type、缺 message 等） | 记一行，继续（调用方 bug） |
 | 其他非零 | lark-cli 发送失败（透传 lark-cli exit 码） | 记一行，继续（非致命） |
 
@@ -113,7 +131,7 @@ bash ~/projects/cc-alarm-larkcli/scripts/notify.sh done "测试：cc-alarm-larkc
 │   └── hook-notify.sh    # hook 入口脚本，解析事件后调用 notify.sh
 ├── SKILL.md              # 技能发现 + 用法（agent 读这个）
 ├── README.md             # 本文件（人读这个）
-├── config.example.sh     # 收件人配置模板，拷到 ~/.config/cc-alarm-larkcli/config.sh
+├── config.example.sh     # 收件人配置模板（可选；不拷贝则默认发给自己），拷到 ~/.config/cc-alarm-larkcli/config.sh
 └── scripts/
     └── notify.sh         # 唯一的执行入口（手动 + hook 共用）
 ```
@@ -172,19 +190,19 @@ rm ~/.cache/cc-alarm-larkcli/last_progress
 
 ## 故障排查
 
-**每次都 exit 2（收件人没配置）**
+**每次都 exit 2（没登录 / 收件人二义）**
 
-stderr 会打印：
+现在有两种 exit 2 场景：
 
-```
-cc-alarm-larkcli: recipient not configured.
-Create ~/.config/cc-alarm-larkcli/config.sh with exactly one of:
-  RECIPIENT_USER_ID="ou_xxx"   # DM a user
-  RECIPIENT_CHAT_ID="oc_xxx"   # send to a chat
-See config.example.sh for the full template.
-```
+1. **没登录用户**：没配 `RECIPIENT_USER_ID`/`RECIPIENT_CHAT_ID`，且 `lark-cli auth status` 解析不到登录用户身份。stderr 会打印：
 
-按提示把 `config.sh` 配好，二选一填 `ou_xxx` 或 `oc_xxx`。两个都填 = 二义 = 同样 exit 2。
+   ```
+   cc-alarm-larkcli: recipient not configured and no logged-in user; run 'lark-cli auth login' then retry.
+   ```
+
+   解决：跑 `lark-cli auth login`（见 `lark-shared` skill），登录后默认就发给你自己，不用配 config.sh。
+
+2. **收件人二义**：`config.sh` 里 `RECIPIENT_USER_ID` 和 `RECIPIENT_CHAT_ID` 两个都填了。stderr 会提示 `recipient ambiguous — set exactly ONE ...`。删掉其中一个即可。
 
 **`progress` 老是不发（被节流）**
 
@@ -195,8 +213,8 @@ stderr 会提示 `progress throttled (last sent <N>s ago, min <THROTTLE_SECONDS>
 stderr 会打印 `cc-alarm-larkcli: send failed (type=<type>, lark-cli exit <N>); <lark-cli 第一行 stderr>`。常见原因：
 
 - 认证过期 → 跑 `lark-cli auth login`，细节见 `lark-shared` skill。
-- 权限不足（41050 / Permission denied）→ 多半是 `--as user` 的可见范围问题，见 `lark-shared`。
-- 收件人 ID 错了 → 重新 `+search-user --user-ids me` / `+chat-search` 确认。
+- 权限不足（41050 / Permission denied）→ 多半是 `--as user` 的可见范围问题，见 `lark-shared`。默认走 `--as bot` 不会有这问题。
+- 收件人 ID 错了（仅当你覆盖了默认、填了 `RECIPIENT_USER_ID`/`RECIPIENT_CHAT_ID`）→ 重新 `+chat-search` 确认群 ID；个人 ID 一般不用手填（默认发给自己）。
 
 不管哪种，**都是非致命**——主任务照跑，记一行继续。
 
