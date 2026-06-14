@@ -1,0 +1,5 @@
+{
+  "name": "cc-alarm-larkcli",
+  "version": "1.0.0",
+  "description": "用 lark-cli 给飞书发通知：任务完成/需要确认/出错告警；含 Stop、SubagentStop、Notification 三个自动 hook，agent 停止或等你输入时自动推送"
+}
