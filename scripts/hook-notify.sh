@@ -67,6 +67,12 @@ if [ "$stop_active" = "true" ]; then
   exit 0
 fi
 
+# Suppress SubagentStop entirely: the main agent's Stop carries the turn
+# summary, so a separate ping per subagent finish is just noise. No send.
+if [ "$event" = "SubagentStop" ]; then
+  exit 0
+fi
+
 # ---------------------------------------------------------------------------
 # Step 4: event -> type mapping + body resolution.
 # ---------------------------------------------------------------------------
@@ -80,6 +86,65 @@ case "$event" in
       body="$notif_msg"
     else
       body="Claude 通知"
+    fi
+
+    # Suppress idle "waiting for your input" notifications — these are false
+    # alarms in agent-driven flows. Case-insensitive substring match.
+    if [ -n "$notif_msg" ] \
+       && printf '%s' "$notif_msg" | grep -qi 'waiting for your input'; then
+      exit 0
+    fi
+
+    # Enrich non-idle notifications (e.g. permission prompts) with specifics
+    # from the MOST RECENT tool_use block in the transcript. Best-effort:
+    # any failure (no transcript, no tool_use, jq error) falls back to the
+    # original body silently — never crash, never drop the notification.
+    if [ -n "$notif_msg" ] && [ "$has_jq" -eq 1 ] \
+       && [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
+      tool_name="$(jq -rs '
+        [ .[] | select(.type == "assistant")
+               | (.message.content // [])[]
+               | select(.type == "tool_use") ] | last | .name // empty
+      ' "$transcript_path" 2>/dev/null)"
+
+      if [ -n "$tool_name" ]; then
+        case "$tool_name" in
+          Bash)
+            tool_detail="$(jq -rs '
+              [ .[] | select(.type == "assistant")
+                     | (.message.content // [])[]
+                     | select(.type == "tool_use") ] | last
+              | .input.command // empty
+            ' "$transcript_path" 2>/dev/null)"
+            tool_detail="${tool_detail:0:150}"
+            ;;
+          Edit|Write|Read|NotebookEdit|MultiEdit)
+            tool_detail="$(jq -rs '
+              [ .[] | select(.type == "assistant")
+                     | (.message.content // [])[]
+                     | select(.type == "tool_use") ] | last
+              | .input.file_path // empty
+            ' "$transcript_path" 2>/dev/null)"
+            ;;
+          *)
+            # Anything else: truncated JSON of the whole .input object.
+            tool_detail="$(jq -rs '
+              [ .[] | select(.type == "assistant")
+                     | (.message.content // [])[]
+                     | select(.type == "tool_use") ] | last
+              | .input | tostring
+            ' "$transcript_path" 2>/dev/null)"
+            tool_detail="${tool_detail:0:150}"
+            ;;
+        esac
+
+        if [ -n "$tool_detail" ]; then
+          # Compose: original message + tool name + key detail.
+          body="$(printf '%s\n\n工具：%s\n%s' "$notif_msg" "$tool_name" "$tool_detail")"
+        else
+          body="$(printf '%s\n\n工具：%s' "$notif_msg" "$tool_name")"
+        fi
+      fi
     fi
     ;;
   Stop|SubagentStop)

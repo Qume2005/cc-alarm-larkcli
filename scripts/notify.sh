@@ -2,7 +2,7 @@
 # cc-alarm-larkcli/notify.sh — thin wrapper around `lark-cli` to send Feishu
 # notifications from a subagent's Bash environment. Best-effort, non-blocking.
 #
-# Usage: notify.sh <type> "<message>" [--dry-run] [--force] [--markdown] [--help|-h]
+# Usage: notify.sh <type> "<message>" [--dry-run] [--force] [--markdown] [--text|--plain] [--help|-h]
 # See the plan contract at .claude/development-team/planner/cc-alarm-larkcli-june-14th-2026.md
 #
 # NOTE: `set -u` (NOT `set -e`). The script controls its own exit codes and must
@@ -26,7 +26,12 @@ Arguments:
   message    Body text. Quote it on the command line (no word-splitting).
 
 Flags (any order, after the two positionals):
-  --markdown   Send message as markdown (lark-cli --markdown). Default: plain --text.
+  --markdown   Send message as markdown (lark-cli --markdown, rich-text post format).
+               This is the DEFAULT. lark-cli auto-wraps the body to post format so
+               **bold**, lists, and ## headings render in Feishu; plain text passes
+               through unstyled. Accepted for back-compat (now a no-op default).
+  --text, --plain   Force plain --text mode (lark-cli --text, no markdown rendering).
+               Use this to opt out of the markdown default.
   --dry-run    Print the resolved lark-cli command line to stdout, do not send, exit 0.
                Still validates args + config, still throttles 'progress' (unless --force).
   --force      Bypass throttle (only meaningful for 'progress'; ignored otherwise).
@@ -49,7 +54,7 @@ EOF
 # ---------------------------------------------------------------------------
 type_name=""
 message=""
-use_markdown=0
+use_markdown=1   # DEFAULT: markdown (lark-cli post rich-text). --text/--plain flips to 0.
 dry_run=0
 force=0
 
@@ -65,6 +70,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --markdown)
       use_markdown=1
+      shift
+      ;;
+    --text|--plain)
+      use_markdown=0
       shift
       ;;
     --dry-run)
@@ -125,8 +134,9 @@ case "$type_name" in
 esac
 
 # ---------------------------------------------------------------------------
-# Validate message: required, unless --markdown (rare empty-body case allowed).
-# Per contract §2: empty message allowed ONLY if --markdown also given.
+# Validate message: required unless markdown mode is on.
+# Markdown mode is the DEFAULT (use_markdown=1), so an empty body is accepted
+# by default; it is only rejected when --text/--plain forces plain-text mode.
 # ---------------------------------------------------------------------------
 if [[ -z "$message" && "$use_markdown" -ne 1 ]]; then
   echo "$PROG: message is required" >&2

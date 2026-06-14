@@ -102,9 +102,12 @@ bash ~/projects/cc-alarm-larkcli/scripts/notify.sh done "测试：cc-alarm-larkc
 
 ## Flags
 
+**默认按 markdown 发送**（lark-cli 的 `--markdown`，飞书 post 富文本）。所以 `**bold**`、列表、`##` 标题会正常渲染，不再出现字面 `**`。固定头 `## <emoji> <标题>\n\n` 会自动前置、不可配置；你的消息若也以 `#` 开头会出两个相邻标题（预期）。想发不渲染的纯文本，用 `--text`/`--plain` 强制切回纯文本模式（固定头退化为 `emoji 标题\n`，正文原样拼接不做归一化）。
+
 | Flag | 作用 |
 |------|------|
-| `--markdown` | `<message>` 当 markdown 发（lark-cli 自动包成 post）。默认纯文本 `--text`。固定头 `## <emoji> <标题>\n\n` 会自动前置、不可配置；你的消息若也以 `#` 开头会出两个相邻标题（预期）。 |
+| `--markdown` | （默认）按 markdown 发（lark-cli 自动包成 post 富文本）。传入是显式声明，与不加 flag 等价，保留是为了向后兼容。 |
+| `--text` / `--plain` | 强制纯文本 `--text` 模式，不渲染 markdown。用这个 opt out 默认的 markdown 行为。 |
 | `--dry-run` | 不发送，打印本次解析出的完整 `lark-cli ...` 命令行到 stdout，exit 0。仍校验参数（坏 type→exit 3）和配置（缺失/二义→exit 2），仍对 `progress` 跑节流检查。打印的 `--idempotency-key` 是本次实时生成的，仅示意；复用那行会重新生成新 key。 |
 | `--force` | 仅 `progress` 有效，突破节流强制发。其他 type 传入被忽略，不报错。 |
 | `--help` / `-h` | 打印 usage，exit 0，优先级最高。 |
@@ -140,26 +143,45 @@ bash ~/projects/cc-alarm-larkcli/scripts/notify.sh done "测试：cc-alarm-larkc
 
 本技能现在是一个 **`@skills-dir` 插件**：在项目根加了 `.claude-plugin/plugin.json`，顺着已有的软链 `~/.claude/skills/cc-alarm-larkcli → ~/projects/cc-alarm-larkcli`，Claude Code 启动时自动把它当本地插件加载。**零安装、无需 marketplace**——软链建好、Claude Code 启动即可用。
 
-插件带 **3 个自动 hook**，在生命周期事件触发时直接调用 `notify.sh` 发飞书。这是"硬性/自动"的：agent 停下或等你输入时自动推送，**不依赖模型记得用 skill**。手动 `notify.sh` 调用（见上文「四种消息类型」）仍完全可用，适合 ad-hoc 自定义推送。
+插件带 **3 个自动 hook**，在生命周期事件触发时直接调用 `notify.sh` 发飞书。这是"硬性/自动"的：agent 停下或等你授权时自动推送，**不依赖模型记得用 skill**。手动 `notify.sh` 调用（见上文「四种消息类型」）仍完全可用，适合 ad-hoc 自定义推送。
 
 ### Hook 事件映射
 
 | Hook 事件 | 触发时机 | → notify.sh type | 正文来源 |
 |---|---|---|---|
-| `Notification` | agent 等你授权 / 空闲 | `ask` 🙋 | hook stdin 的 message（Claude Code 传入） |
-| `Stop` | 主 agent 每轮结束 | `done` ✅ | 读本轮 transcript 最后 assistant 文本（截 200 字）；读不到则回退 "主 agent 一轮结束" |
-| `SubagentStop` | 子 agent 完成 | `done` ✅ | 读 transcript 最后 assistant 文本；读不到则回退 "子 agent 完成" |
+| `Stop` | 主 agent 每轮结束 | `done` ✅ | 读本轮 transcript 最后 assistant 文本（截 200 字）；读不到则回退 "主 agent 一轮结束"。默认按 markdown 渲染。 |
+| `SubagentStop` | 子 agent 完成 | **不推送**（抑制） | — |
+| `Notification`（权限请求） | agent 等你授权某操作 | `ask` 🙋 | hook stdin 的 message + 从 transcript 最近一个 `tool_use` 补充「工具：名称 + 关键细节」（见下） |
+| `Notification`（空闲等待） | "Claude is waiting for your input" | **不推送**（抑制） | — |
+
+**SubagentStop 抑制**：子 agent 完成不再单独 ping。主 agent 的 `Stop` 会携带本轮汇总，所以每个子 agent 再 ping 一次纯属噪音。这条在 hook 最早阶段直接 `exit 0`，不进入节流、不发消息。
+
+**Notification 的两种情况**：
+- **空闲等待**（"Claude is waiting for your input" 这类）→ **抑制不发**。在 agent 自动跑的流程里这是误报（agent 根本没卡，只是 hook 触发了）。大小写不敏感的子串匹配后直接 `exit 0`。
+- **权限请求**（"Claude needs your permission…"）→ **发，并且补充细节**。除了转发原始 message，还会尽力（best-effort）读 transcript 里**最近一个** `tool_use` 块，把要你批准的具体操作拼进正文：
+  - `Bash` → 工具名 + 命令（截 150 字）
+  - `Edit`/`Write`/`Read`/`NotebookEdit`/`MultiEdit` → 工具名 + 文件路径
+  - 其他工具 → 工具名 + `input` 的截断 JSON（150 字）
+  - 读不到（没 transcript、没 `tool_use`、jq 缺失或报错）→ 静默回退到只发原始 message，绝不丢通知、绝不崩。
+
+  拼接格式：
+  ```
+  <原始 message>
+
+  工具：<工具名>
+  <细节>
+  ```
 
 ### 节流（防刷屏）
 
-脚本内置节流，避免主 agent 每轮、子 agent 每次都刷屏：
+脚本内置节流，避免主 agent 每轮都刷屏：
 
 | 变量（在 `~/.config/cc-alarm-larkcli/config.sh`） | 默认 | 含义 |
 |---|---|---|
-| `HOOK_THROTTLE_DONE` | `120` | `done`（Stop/SubagentStop）两次推送最小间隔秒数 |
-| `HOOK_THROTTLE_ASK` | `60` | `ask`（Notification）两次推送最小间隔秒数 |
+| `HOOK_THROTTLE_DONE` | `120` | `done`（仅 `Stop` 触发，见上 `SubagentStop` 已抑制）两次推送最小间隔秒数 |
+| `HOOK_THROTTLE_ASK` | `60` | `ask`（权限请求 `Notification`）两次推送最小间隔秒数 |
 
-注意：手动 `progress` 调用用的是 `THROTTLE_SECONDS`（默认 300），与上面的 hook 节流是两套独立的配置项。
+注意：手动 `progress` 调用用的是 `THROTTLE_SECONDS`（默认 300），与上面的 hook 节流是两套独立的配置项。`SubagentStop` 抑制后，`done` 节流实际上只对 `Stop` 触发的推送生效。
 
 ### 发送失败非致命
 
